@@ -1,0 +1,223 @@
+<!DOCTYPE html>
+<html lang="es">
+<head>
+    <meta charset="UTF-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1.0">
+    <title>SMMZing Panel Clon</title>
+    <link href="https://cdn.jsdelivr.net/npm/bootstrap@5.3.0/dist/css/bootstrap.min.css" rel="stylesheet">
+    <script src="https://www.gstatic.com/firebasejs/8.10.1/firebase-app.js"></script>
+    <script src="https://www.gstatic.com/firebasejs/8.10.1/firebase-auth.js"></script>
+    <script src="https://www.gstatic.com/firebasejs/8.10.1/firebase-database.js"></script>
+    <style>
+        body { background-color: #f4f6f9; font-family: 'Segoe UI', Tahoma, Geneva, Verdana, sans-serif; }
+        .hidden { display: none !important; }
+        .panel-container { max-width: 800px; margin: 40px auto; }
+        .card { border: none; border-radius: 10px; }
+        .card-header { border-top-left-radius: 10px !important; border-top-right-radius: 10px !important; }
+    </style>
+</head>
+<body>
+
+<div class="container panel-container">
+    
+    <div id="login-section" class="card shadow-sm">
+        <div class="card-header bg-primary text-white text-center py-3">
+            <h3 class="mb-0">Iniciar Sesión - Panel SMM</h3>
+        </div>
+        <div class="card-body p-4">
+            <form id="login-form">
+                <div class="mb-3">
+                    <label class="form-label fw-semibold">Email</label>
+                    <input type="email" id="email" class="form-control" placeholder="ejemplo@correo.com" required>
+                </div>
+                <div class="mb-4">
+                    <label class="form-label fw-semibold">Contraseña</label>
+                    <input type="password" id="password" class="form-control" placeholder="••••••••" required>
+                </div>
+                <button type="submit" class="btn btn-primary w-100 py-2 fw-bold">Ingresar</button>
+                <button type="button" id="btn-register" class="btn btn-outline-secondary w-100 mt-2 py-2">Registrarse</button>
+            </form>
+            <div id="auth-error" class="text-danger mt-3 text-center fw-medium"></div>
+        </div>
+    </div>
+
+    <div id="dashboard-section" class="hidden">
+        <div class="d-flex justify-content-between align-items-center mb-4">
+            <h2 class="h3 mb-0 fw-bold text-secondary">Dashboard del Panel</h2>
+            <button id="btn-logout" class="btn btn-danger px-4">Cerrar Sesión</button>
+        </div>
+
+        <div class="row mb-4 g-3">
+            <div class="col-md-6">
+                <div class="card bg-success text-white h-100 shadow-sm">
+                    <div class="card-body text-center d-flex flex-column justify-content-center p-4">
+                        <h5 class="card-title opacity-75">Saldo en Firebase</h5>
+                        <h3 id="firebase-balance" class="display-6 fw-bold">$0.00</h3>
+                    </div>
+                </div>
+            </div>
+            <div class="col-md-6">
+                <div class="card bg-info text-white h-100 shadow-sm">
+                    <div class="card-body text-center d-flex flex-column justify-content-center p-4">
+                        <h5 class="card-title opacity-75">Saldo en SMMZing (API)</h5>
+                        <h3 id="api-balance" class="display-6 fw-bold">Cargando...</h3>
+                        <div>
+                            <button class="btn btn-light btn-sm mt-2 px-3 fw-medium text-info" onclick="verSaldoAPI()">Actualizar</button>
+                        </div>
+                    </div>
+                </div>
+            </div>
+        </div>
+
+        <div class="card shadow-sm mb-4">
+            <div class="card-header bg-white d-flex justify-content-between align-items-center py-3">
+                <h4 class="h5 mb-0 fw-bold text-dark">Servicios Disponibles</h4>
+                <button class="btn btn-sm btn-primary px-3" onclick="verServicios()">Cargar API</button>
+            </div>
+            <div class="card-body p-0">
+                <div class="table-responsive">
+                    <table class="table table-hover align-middle mb-0">
+                        <thead class="table-light">
+                            <tr>
+                                <th class="ps-4">ID</th>
+                                <th>Servicio</th>
+                                <th>Tasa ($)</th>
+                                <th class="pe-4">Min / Max</th>
+                            </tr>
+                        </thead>
+                        <tbody id="services-table-body">
+                            <tr>
+                                <td colspan="4" class="text-center text-muted py-4">Haz clic en cargar API para consultar SMMZing.</td>
+                            </tr>
+                        </tbody>
+                    </table>
+                </div>
+            </div>
+        </div>
+    </div>
+
+</div>
+
+<script>
+    const firebaseConfig = {
+        apiKey: "AIzaSyB5j4M1kUPrKElCk9IJYnnXtS7MvVzhs98",
+        authDomain: "loginhackstore.firebaseapp.com",
+        databaseURL: "https://loginhackstore-default-rtdb.firebaseio.com",
+        projectId: "loginhackstore",
+        storageBucket: "loginhackstore.firebasestorage.app",
+        messagingSenderId: "970450708523",
+        appId: "1:970450708523:web:925cb8a2f9679464c7226e"
+    };
+
+    if (!firebase.apps.length) firebase.initializeApp(firebaseConfig);
+    const auth = firebase.auth();
+    const database = firebase.database();
+
+    // Ruta unificada y relativa para el proxy
+    const API_URL = "/api/smm";
+
+    const loginSection = document.getElementById('login-section');
+    const dashboardSection = document.getElementById('dashboard-section');
+    const authError = document.getElementById('auth-error');
+
+    auth.onAuthStateChanged(user => {
+        if (user) {
+            loginSection.classList.add('hidden');
+            dashboardSection.classList.remove('hidden');
+            leerSaldoFirebase(user.uid);
+            verSaldoAPI();
+        } else {
+            loginSection.classList.remove('hidden');
+            dashboardSection.classList.add('hidden');
+        }
+    });
+
+    document.getElementById('login-form').addEventListener('submit', (e) => {
+        e.preventDefault();
+        authError.innerText = "";
+        const email = document.getElementById('email').value;
+        const pass = document.getElementById('password').value;
+        auth.signInWithEmailAndPassword(email, pass)
+            .catch(error => authError.innerText = "Error: " + error.message);
+    });
+
+    document.getElementById('btn-register').addEventListener('click', () => {
+        authError.innerText = "";
+        const email = document.getElementById('email').value;
+        const pass = document.getElementById('password').value;
+        if(email && pass) {
+            auth.createUserWithEmailAndPassword(email, pass)
+                .then((userCredential) => {
+                    database.ref('usuarios/' + userCredential.user.uid).set({ saldo: 0 });
+                })
+                .catch(error => authError.innerText = "Error: " + error.message);
+        } else {
+            authError.innerText = "Ingresa un correo y contraseña para registrarte.";
+        }
+    });
+
+    document.getElementById('btn-logout').addEventListener('click', () => {
+        auth.signOut();
+    });
+
+    function leerSaldoFirebase(uid) {
+        database.ref('usuarios/' + uid + '/saldo').on('value', (snapshot) => {
+            const saldo = snapshot.val();
+            document.getElementById('firebase-balance').innerText = saldo !== null ? `$${parseFloat(saldo).toFixed(2)}` : '$0.00';
+        });
+    }
+
+    async function requestSMM(action, extraParams = {}) {
+        const bodyData = new URLSearchParams();
+        bodyData.append('action', action);
+        for (const [key, value] of Object.entries(extraParams)) bodyData.append(key, value);
+
+        try {
+            const response = await fetch(API_URL, {
+                method: 'POST',
+                headers: { 'Content-Type': 'application/x-www-form-urlencoded' },
+                body: bodyData.toString()
+            });
+            return await response.json();
+        } catch (error) {
+            return null;
+        }
+    }
+
+    async function verSaldoAPI() {
+        document.getElementById('api-balance').innerText = "Cargando...";
+        const data = await requestSMM('balance');
+        if (data && data.balance !== undefined) {
+            document.getElementById('api-balance').innerText = `$${parseFloat(data.balance).toFixed(2)} ${data.currency || 'USD'}`;
+        } else {
+            document.getElementById('api-balance').innerText = "Error de Carga";
+        }
+    }
+
+    async function verServicios() {
+        const tbody = document.getElementById('services-table-body');
+        tbody.innerHTML = '<tr><td colspan="4" class="text-center py-4">Consultando servicios...</td></tr>';
+        
+        const data = await requestSMM('services');
+        if (data && Array.isArray(data)) {
+            tbody.innerHTML = '';
+            if(data.length === 0) return tbody.innerHTML = '<tr><td colspan="4" class="text-center text-muted py-4">No hay servicios.</td></tr>';
+            
+            data.forEach(servicio => {
+                tbody.innerHTML += `
+                    <tr>
+                        <td class="ps-4 fw-bold text-secondary">${servicio.service}</td>
+                        <td class="fw-medium">${servicio.name}</td>
+                        <td class="text-success fw-bold">$${parseFloat(servicio.rate).toFixed(3)}</td>
+                        <td class="pe-4 text-muted">${servicio.min} / ${servicio.max}</td>
+                    </tr>
+                `;
+            });
+        } else {
+            tbody.innerHTML = '<tr><td colspan="4" class="text-center text-danger py-4 fw-medium">Error al sincronizar.</td></tr>';
+        }
+    }
+</script>
+<script src="https://cdn.jsdelivr.net/npm/bootstrap@5.3.0/dist/js/bootstrap.bundle.min.js"></script>
+</body>
+</html>
