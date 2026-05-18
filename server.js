@@ -1,7 +1,7 @@
 const express = require('express');
 const cors = require('cors');
 const path = require('path');
-const cron = require('node-cron'); // <-- Añadido para automatización
+const cron = require('node-cron');
 
 const app = express();
 const PORT = process.env.PORT || 3000;
@@ -17,7 +17,9 @@ const SMM_URL = "https://smmzing.com/api/v3";
 const FIREBASE_DB_URL = "https://loginhackstore-default-rtdb.firebaseio.com";
 const PROFIT_MARGIN = 1.20; // 20% de ganancia
 
-// 1. RUTA CLÁSICA (Para las compras directas desde tu HTML)
+// ==========================================
+// 1. RUTA CLÁSICA (COMPRAS DIRECTAS)
+// ==========================================
 app.post('/api/smm', async (req, res) => {
     try {
         const { action, ...extraParams } = req.body;
@@ -26,7 +28,6 @@ app.post('/api/smm', async (req, res) => {
         const params = new URLSearchParams();
         params.append('key', API_KEY);
         
-        // CORRECCIÓN: Los paneles SMM no entienden 'multi_status', se convierte a 'status'
         if (action === 'multi_status') {
             params.append('action', 'status');
         } else {
@@ -50,7 +51,9 @@ app.post('/api/smm', async (req, res) => {
     }
 });
 
+// ==========================================
 // 2. NUEVA RUTA: API PARA REVENDEDORES
+// ==========================================
 app.post('/api/v1/reseller', async (req, res) => {
     try {
         const { key, action, service, link, quantity, order } = req.body;
@@ -69,10 +72,7 @@ app.post('/api/v1/reseller', async (req, res) => {
         }
 
         if (action === 'balance') {
-            return res.json({ 
-                balance: parseFloat(userData.balance || 0).toFixed(4), 
-                currency: "USD" 
-            });
+            return res.json({ balance: parseFloat(userData.balance || 0).toFixed(4), currency: "USD" });
         }
 
         if (action === 'services') {
@@ -167,89 +167,120 @@ app.post('/api/v1/reseller', async (req, res) => {
 
     } catch (err) {
         console.error("API Reseller Error:", err);
-        return res.status(500).json({ error: "Internal server error connecting to SMM provider" });
+        return res.status(500).json({ error: "Internal server error" });
     }
 });
 
 // ==========================================
-// TAREA AUTOMÁTICA (CRON JOB) - SINCRONIZACIÓN SMM (Cada 10 mins)
+// 3. FUNCIÓN DE SINCRONIZACIÓN (BLINDADA - INDIVIDUAL)
 // ==========================================
-cron.schedule('*/10 * * * *', async () => {
+async function syncAllSmmOrders() {
     console.log('[CRON] Iniciando sincronización automática de pedidos SMM...');
+    let updatesCount = 0;
+    let refundsCount = 0;
+
     try {
         const usersRes = await fetch(`${FIREBASE_DB_URL}/users.json`);
         const users = await usersRes.json();
         
-        if (!users) return;
+        if (!users) {
+            console.log('[CRON] No hay usuarios en la base de datos.');
+            return { updatesCount, refundsCount, status: 'No users' };
+        }
 
-        let ordersToSync = [];
-        let orderMap = {};
-
+        // Recorremos todos los usuarios
         for (const [uid, userData] of Object.entries(users)) {
-            if (userData.history) {
-                for (const [historyKey, order] of Object.entries(userData.history)) {
-                    if (order.type === 'smm' && order.smmOrderId && !order.refunded) {
-                        const status = (order.smmStatus || 'pending').toLowerCase();
-                        if (status !== 'completed' && status !== 'canceled' && status !== 'partial') {
-                            ordersToSync.push(order.smmOrderId);
-                            orderMap[order.smmOrderId] = { uid, historyKey, price: order.price || 0 };
+            if (!userData.history) continue;
+
+            // Recorremos el historial de cada usuario
+            for (const [historyKey, order] of Object.entries(userData.history)) {
+                // Buscamos pedidos pendientes
+                if (order.type === 'smm' && order.smmOrderId && !order.refunded) {
+                    const status = (order.smmStatus || 'pending').toLowerCase();
+                    
+                    if (status !== 'completed' && status !== 'canceled' && status !== 'partial') {
+                        // ¡AQUÍ ESTÁ LA MAGIA! Consultamos UNO POR UNO a SMMZing
+                        try {
+                            const params = new URLSearchParams();
+                            params.append('key', API_KEY);
+                            params.append('action', 'status');
+                            params.append('order', order.smmOrderId); // Consulta singular
+
+                            const smmRes = await fetch(SMM_URL, {
+                                method: 'POST',
+                                headers: { 'Content-Type': 'application/x-www-form-urlencoded' },
+                                body: params.toString()
+                            });
+                            
+                            const apiData = await smmRes.json();
+
+                            if (apiData && apiData.status && !apiData.error) {
+                                const newStatus = apiData.status;
+                                const statusLower = newStatus.toLowerCase();
+                                const isCanceled = (statusLower === 'canceled' || statusLower === 'error');
+
+                                // Preparar actualización para Firebase
+                                const historyUpdate = { smmStatus: newStatus };
+                                if (isCanceled) historyUpdate.refunded = true;
+
+                                // Actualizar el pedido en Firebase
+                                await fetch(`${FIREBASE_DB_URL}/users/${uid}/history/${historyKey}.json`, {
+                                    method: 'PATCH',
+                                    headers: { 'Content-Type': 'application/json' },
+                                    body: JSON.stringify(historyUpdate)
+                                });
+                                updatesCount++;
+
+                                // Aplicar reembolso si fue cancelado
+                                if (isCanceled) {
+                                    const freshUserRes = await fetch(`${FIREBASE_DB_URL}/users/${uid}.json`);
+                                    const freshUserData = await freshUserRes.json();
+                                    const updatedBalance = parseFloat(freshUserData.balance || 0) + parseFloat(order.price || 0);
+
+                                    await fetch(`${FIREBASE_DB_URL}/users/${uid}.json`, {
+                                        method: 'PATCH',
+                                        headers: { 'Content-Type': 'application/json' },
+                                        body: JSON.stringify({ balance: updatedBalance })
+                                    });
+                                    refundsCount++;
+                                    console.log(`[CRON] Reembolso de $${order.price} aplicado a UID: ${uid}`);
+                                }
+                            }
+                        } catch (smmError) {
+                            console.error(`[CRON] Error al consultar orden #${order.smmOrderId}:`, smmError);
                         }
                     }
                 }
             }
         }
+        
+        console.log(`[CRON] Sincronización finalizada. Actualizados: ${updatesCount} | Reembolsos: ${refundsCount}`);
+        return { updatesCount, refundsCount, status: 'Success' };
 
-        if (ordersToSync.length === 0) return;
-
-        const params = new URLSearchParams();
-        params.append('key', API_KEY);
-        params.append('action', 'status');
-        params.append('orders', ordersToSync.join(','));
-
-        const smmRes = await fetch(SMM_URL, {
-            method: 'POST',
-            headers: { 'Content-Type': 'application/x-www-form-urlencoded' },
-            body: params.toString()
-        });
-        const smmStatuses = await smmRes.json();
-
-        for (const [smmId, apiData] of Object.entries(smmStatuses)) {
-            if (!apiData || apiData.error || !apiData.status) continue;
-            
-            const orderInfo = orderMap[smmId];
-            if (!orderInfo) continue;
-
-            const newStatus = apiData.status;
-            const statusLower = newStatus.toLowerCase();
-            const isCanceled = (statusLower === 'canceled' || statusLower === 'error');
-
-            const historyUpdate = { smmStatus: newStatus };
-            if (isCanceled) historyUpdate.refunded = true;
-
-            await fetch(`${FIREBASE_DB_URL}/users/${orderInfo.uid}/history/${orderInfo.historyKey}.json`, {
-                method: 'PATCH',
-                headers: { 'Content-Type': 'application/json' },
-                body: JSON.stringify(historyUpdate)
-            });
-
-            if (isCanceled) {
-                const freshUserRes = await fetch(`${FIREBASE_DB_URL}/users/${orderInfo.uid}.json`);
-                const freshUserData = await freshUserRes.json();
-                const updatedBalance = parseFloat(freshUserData.balance || 0) + parseFloat(orderInfo.price);
-
-                await fetch(`${FIREBASE_DB_URL}/users/${orderInfo.uid}.json`, {
-                    method: 'PATCH',
-                    headers: { 'Content-Type': 'application/json' },
-                    body: JSON.stringify({ balance: updatedBalance })
-                });
-            }
-        }
-        console.log('[CRON] Sincronización finalizada con éxito.');
     } catch (error) {
-        console.error('[CRON] Error en la sincronización:', error);
+        console.error('[CRON] Error crítico general en la sincronización:', error);
+        return { error: error.message };
     }
+}
+
+// ==========================================
+// 4. PROGRAMACIÓN DEL CRON JOB (Cada 10 mins)
+// ==========================================
+cron.schedule('*/10 * * * *', () => {
+    syncAllSmmOrders();
 });
 
+// ==========================================
+// 5. RUTA SECRETA PARA FORZAR EL CRON MANUALMENTE
+// ==========================================
+// Entra a tu navegador y pon: https://tu-link-de-railway.app/api/force-cron
+app.get('/api/force-cron', async (req, res) => {
+    console.log('[MANUAL] Se ha forzado la ejecución del Cron desde la URL');
+    const result = await syncAllSmmOrders();
+    res.json({ message: "Sincronización forzada completada", result });
+});
+
+// === MANEJO DE RUTAS DEL FRONTEND ===
 app.get('*', (req, res) => {
     res.sendFile(path.join(__dirname, 'public', 'index.html'));
 });
