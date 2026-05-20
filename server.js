@@ -12,7 +12,8 @@ app.use(express.json());
 app.use(express.static(path.join(__dirname, 'public')));
 
 // === CREDENCIALES Y CONFIGURACIÓN ===
-const API_KEY = process.env.SMM_API_KEY || "sk_live_2676ddf0f84e379fe7b6ee3698224310e06a132fb127ad0e";
+// ¡API Key actualizada!
+const API_KEY = process.env.SMM_API_KEY || "sk_live_cffd7457e7cc29b2ca672cceb4359382491eb720a438f083";
 const SMM_URL = "https://smmzing.com/api/v3";
 const FIREBASE_DB_URL = "https://loginhackstore-default-rtdb.firebaseio.com";
 const PROFIT_MARGIN = 1.20; // 20% de ganancia
@@ -27,12 +28,7 @@ app.post('/api/smm', async (req, res) => {
 
         const params = new URLSearchParams();
         params.append('key', API_KEY);
-        
-        if (action === 'multi_status') {
-            params.append('action', 'status');
-        } else {
-            params.append('action', action);
-        }
+        params.append('action', action); // Ya no forzamos multi_status a status, SMMZing lo soporta
 
         for (const [key, value] of Object.entries(extraParams)) {
             params.append(key, value);
@@ -52,11 +48,11 @@ app.post('/api/smm', async (req, res) => {
 });
 
 // ==========================================
-// 2. NUEVA RUTA: API PARA REVENDEDORES
+// 2. NUEVA RUTA: API PARA REVENDEDORES (100% COMPATIBLE)
 // ==========================================
 app.post('/api/v1/reseller', async (req, res) => {
     try {
-        const { key, action, service, link, quantity, order } = req.body;
+        const { key, action, service, link, quantity, order, orders } = req.body;
         
         if (!key || !key.startsWith('luck_')) {
             return res.status(401).json({ error: "Invalid API Key format" });
@@ -71,10 +67,12 @@ app.post('/api/v1/reseller', async (req, res) => {
             return res.status(401).json({ error: "Unauthorized API Key" });
         }
 
+        // --- ACCIÓN: BALANCE ---
         if (action === 'balance') {
             return res.json({ balance: parseFloat(userData.balance || 0).toFixed(4), currency: "USD" });
         }
 
+        // --- ACCIÓN: SERVICIOS ---
         if (action === 'services') {
             const smmRes = await fetch(SMM_URL, {
                 method: 'POST',
@@ -91,6 +89,7 @@ app.post('/api/v1/reseller', async (req, res) => {
             return res.json(markedUpServices);
         }
 
+        // --- ACCIÓN: CREAR ORDEN (ADD) ---
         if (action === 'add') {
             if (!service || !link || !quantity) return res.status(400).json({ error: "Missing parameters: service, link, quantity required" });
             
@@ -109,7 +108,7 @@ app.post('/api/v1/reseller', async (req, res) => {
             const userBalance = parseFloat(userData.balance || 0);
 
             if (userBalance < totalCost) {
-                return res.status(400).json({ error: "Insufficient balance in your LUCK XIT account" });
+                return res.status(400).json({ error: "Insufficient balance in your account" });
             }
 
             const addRes = await fetch(SMM_URL, {
@@ -151,6 +150,7 @@ app.post('/api/v1/reseller', async (req, res) => {
             }
         }
 
+        // --- ACCIÓN: STATUS ---
         if (action === 'status') {
             if (!order) return res.status(400).json({ error: "Missing order ID" });
             
@@ -161,6 +161,30 @@ app.post('/api/v1/reseller', async (req, res) => {
             });
             
             return res.json(await statusRes.json());
+        }
+
+        // --- NUEVA ACCIÓN: MULTI STATUS ---
+        if (action === 'multi_status') {
+            if (!orders) return res.status(400).json({ error: "Missing orders parameter (comma separated IDs)" });
+            
+            const msRes = await fetch(SMM_URL, {
+                method: 'POST',
+                headers: { 'Content-Type': 'application/x-www-form-urlencoded' },
+                body: new URLSearchParams({ key: API_KEY, action: 'multi_status', orders })
+            });
+            return res.json(await msRes.json());
+        }
+
+        // --- NUEVAS ACCIONES: REFILL, REFILL_STATUS, CANCEL ---
+        if (['refill', 'refill_status', 'cancel'].includes(action)) {
+            if (!order) return res.status(400).json({ error: "Missing order ID" });
+            
+            const extraActionRes = await fetch(SMM_URL, {
+                method: 'POST',
+                headers: { 'Content-Type': 'application/x-www-form-urlencoded' },
+                body: new URLSearchParams({ key: API_KEY, action: action, order })
+            });
+            return res.json(await extraActionRes.json());
         }
 
         return res.status(400).json({ error: "Invalid action" });
@@ -188,23 +212,19 @@ async function syncAllSmmOrders() {
             return { updatesCount, refundsCount, status: 'No users' };
         }
 
-        // Recorremos todos los usuarios
         for (const [uid, userData] of Object.entries(users)) {
             if (!userData.history) continue;
 
-            // Recorremos el historial de cada usuario
             for (const [historyKey, order] of Object.entries(userData.history)) {
-                // Buscamos pedidos pendientes
                 if (order.type === 'smm' && order.smmOrderId && !order.refunded) {
                     const status = (order.smmStatus || 'pending').toLowerCase();
                     
                     if (status !== 'completed' && status !== 'canceled' && status !== 'partial') {
-                        // ¡AQUÍ ESTÁ LA MAGIA! Consultamos UNO POR UNO a SMMZing
                         try {
                             const params = new URLSearchParams();
                             params.append('key', API_KEY);
                             params.append('action', 'status');
-                            params.append('order', order.smmOrderId); // Consulta singular
+                            params.append('order', order.smmOrderId);
 
                             const smmRes = await fetch(SMM_URL, {
                                 method: 'POST',
@@ -219,11 +239,9 @@ async function syncAllSmmOrders() {
                                 const statusLower = newStatus.toLowerCase();
                                 const isCanceled = (statusLower === 'canceled' || statusLower === 'error');
 
-                                // Preparar actualización para Firebase
                                 const historyUpdate = { smmStatus: newStatus };
                                 if (isCanceled) historyUpdate.refunded = true;
 
-                                // Actualizar el pedido en Firebase
                                 await fetch(`${FIREBASE_DB_URL}/users/${uid}/history/${historyKey}.json`, {
                                     method: 'PATCH',
                                     headers: { 'Content-Type': 'application/json' },
@@ -231,7 +249,6 @@ async function syncAllSmmOrders() {
                                 });
                                 updatesCount++;
 
-                                // Aplicar reembolso si fue cancelado
                                 if (isCanceled) {
                                     const freshUserRes = await fetch(`${FIREBASE_DB_URL}/users/${uid}.json`);
                                     const freshUserData = await freshUserRes.json();
@@ -273,7 +290,6 @@ cron.schedule('*/10 * * * *', () => {
 // ==========================================
 // 5. RUTA SECRETA PARA FORZAR EL CRON MANUALMENTE
 // ==========================================
-// Entra a tu navegador y pon: https://tu-link-de-railway.app/api/force-cron
 app.get('/api/force-cron', async (req, res) => {
     console.log('[MANUAL] Se ha forzado la ejecución del Cron desde la URL');
     const result = await syncAllSmmOrders();
