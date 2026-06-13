@@ -13,7 +13,7 @@ app.use(express.static(path.join(__dirname, 'public')));
 
 // === CREDENCIALES Y CONFIGURACIÓN ===
 // ¡API Key actualizada!
-const API_KEY = process.env.SMM_API_KEY || "sk_live_cffd7457e7cc29b2ca672cceb4359382491eb720a438f083";
+const API_KEY = process.env.SMM_API_KEY || "sk_live_24900f5bf10de994fb512e18192c617d2183ce183a82d444";
 const SMM_URL = "https://smmzing.com/api/v3";
 const FIREBASE_DB_URL = "https://loginhackstore-default-rtdb.firebaseio.com";
 const PROFIT_MARGIN = 1.20; // 20% de ganancia
